@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>POC · Devolução idempotente</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f6f8;color:#153442;font:16px system-ui,sans-serif}header{padding:26px 5%;background:#102b3a;color:white}h1{font-size:28px;margin:0 0 8px}header p{margin:0;color:#bad8df}main{max-width:1400px;padding:28px;margin:auto}h2{font-size:19px;margin:0 0 16px}p{line-height:1.5}.grid{display:grid;grid-template-columns:360px 1fr;gap:24px}section{background:white;border:1px solid #dbe4e9;border-radius:10px;padding:22px;margin-bottom:20px}label{display:block;margin:14px 0 8px}button,select,input,textarea{font:inherit}button{border:0;border-radius:6px;padding:11px 14px;background:#116e60;color:white;cursor:pointer;margin:8px 5px 0 0}button.secondary{background:#e8eef2;color:#183b4d}button:disabled{opacity:.5}select,input[type=number],textarea{width:100%;border:1px solid #b9cad3;border-radius:5px;padding:9px}textarea{font:14px monospace;height:165px;resize:vertical}small,.muted{color:#55717e;line-height:1.5}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}.metric{background:#e7f2ef;padding:18px;border-radius:7px}.metric b{font-size:30px;display:block}pre{white-space:pre-wrap;word-break:break-word;background:#102b3a;color:#d6eee7;padding:15px;border-radius:6px;max-height:260px;overflow:auto;font-size:13px}table{width:100%;border-collapse:collapse;font-size:14px}td,th{text-align:left;padding:12px 8px;border-bottom:1px solid #e3ebef;vertical-align:top}.op{padding:15px 0;border-bottom:1px solid #e3ebef}.op strong{display:block;margin-bottom:6px}.steps{font:13px monospace;white-space:pre-wrap;line-height:1.7}.log{max-height:330px;overflow:auto;font:13px monospace;line-height:1.7;white-space:pre-wrap}#notice{min-height:24px;color:#9a3e15}.inline{display:flex;gap:10px;align-items:center}.inline input{width:auto}.address{font:12px monospace;color:#59727f}@media(max-width:950px){.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}main{padding:16px}}
+</style>
+<header><h1>Devolução de compras · laboratório de idempotência</h1><p>Quatro servidores HTTP locais. Simule uma resposta perdida e repita o mesmo pedido.</p></header>
+<main>
+<p class="muted">Simulação comportamental em um processo Node.js. Arquivos JSON representam transações locais; isto não valida locks ou rollback no PostgreSQL das APIs reais.</p>
+<div class="grid"><aside>
+<section><h2>Comparar o problema e a solução</h2><p>Cada botão reinicia os dados e arma um timeout depois de movimentar o estoque. Depois, envie o mesmo pedido duas vezes.</p>
+<button id="originalScenario">Preparar fluxo original</button><button id="sagaScenario" class="secondary">Preparar solução atual</button>
+<p id="mode" class="muted"></p><p id="expected" class="muted"></p></section>
+<section><h2>1. Preparar o cenário</h2>
+<label class="inline"><input type="checkbox" id="idempotency" checked> Receptores idempotentes</label>
+<label class="inline"><input type="checkbox" id="retry" checked> Permitir reenvio de UNKNOWN</label>
+<small id="configHelp">No modo saga, desmarcar idempotência e permitir reenvio reproduz a duplicação no receptor.</small>
+<label for="target">Próxima falha em</label><select id="target"><option value="stock">Estoque</option><option value="people">Crédito na people</option><option value="invoice">Criação da nota</option><option value="references">Referências da nota</option><option value="local">Confirmação local na purchase</option></select>
+<label for="when">Comportamento</label><select id="when"><option value="after">Aplicar efeito e perder a resposta</option><option value="before">Timeout antes de aplicar o efeito</option><option value="reject">Rejeitar a operação</option></select>
+<button id="arm">Armar falha uma vez</button><button class="secondary" id="clear">Limpar falha</button><p id="armed" class="muted"></p>
+</section>
+<section><h2>2. Enviar a devolução</h2><small>Compra 123, item 1, total de 10 unidades. Valor por unidade: R$ 10. O front não cria chave.</small>
+<label for="request">Mesmo JSON para repetir a operação</label><textarea id="request">{"purchaseId":123,"itemId":1,"quantity":2,"amountReturned":0}</textarea>
+<button id="send">Enviar / tentar novamente</button><button id="parallel" class="secondary">Duas chamadas simultâneas</button>
+</section>
+<section><h2>3. Outro usuário altera o estoque</h2><small>Depois de um timeout, altere o saldo e repita. Se o efeito já foi aplicado, o recibo deve prevalecer sobre o saldo atual.</small><label for="stock">Novo saldo</label><input id="stock" type="number" min="0" step="1" value="0"><button id="changeStock" class="secondary">Alterar saldo</button><button id="reset" class="secondary">Reiniciar laboratório</button></section>
+</aside><article>
+<div class="metrics"><div class="metric"><b id="invoices">0</b>Notas criadas</div><div class="metric"><b id="credit">R$ 0</b>Crédito concedido</div><div class="metric"><b id="quantity">10</b>Saldo de estoque</div><div class="metric"><b id="returned">0</b>Qtd. devolvida local</div></div>
+<div id="notice" role="status"></div>
+<section><h2>Resposta do endpoint existente</h2><pre id="response">Aguardando uma chamada…</pre></section>
+<section><h2 id="operationTitle">Operações e etapas salvas</h2><div id="operations">Nenhuma operação.</div><p id="reservation" class="muted"></p></section>
+<section><h2>Efeitos e recibos nos receptores</h2><p class="muted">Em invoice, os efeitos incluem a criação da nota e das referências.</p><table><thead><tr><th>Receptor</th><th>Efeitos aplicados</th><th>Recibos</th></tr></thead><tbody id="receivers"></tbody></table><p id="addresses" class="address"></p></section>
+<section><h2>Linha do tempo</h2><div class="log" id="events"></div></section>
+<details><summary>Estado completo das quatro APIs</summary><pre id="raw"></pre></details>
+<p class="muted">A POC não executa compensação, outbox ou retentativas em segundo plano. No modo saga, a rejeição externa é mantida como UNKNOWN, assim como o tratamento conservador atual. No modo original, os registros mostram tentativas e rollback local, sem recuperação de etapas. Cancelamento de devolução e múltiplas compras não fazem parte desta POC.</p>
+</article></div></main>
+<script>
+const $=id=>document.getElementById(id);
+async function api(route,body){const r=await fetch(route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw new Error(data.error);return data;}
+async function refresh(){const s=await(await fetch('/lab/state')).json();
+ $('invoices').textContent=s.invoice.effects.filter(x=>x.result.target==='invoice').length;
+ $('credit').textContent=s.people.balance.toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+ $('quantity').textContent=s.stock.quantity;$('returned').textContent=s.purchase.returned;
+ $('idempotency').checked=s.purchase.config.idempotency;$('retry').checked=s.purchase.config.retryUnknown;
+ const original=s.purchase.config.mode==='original';
+ $('mode').textContent=original?'Modo: fluxo original, sem chave e sem retomada de etapas.':'Modo: solução atual, com progresso salvo na purchase.';
+ $('expected').textContent=original?'No cenário padrão, após dois envios: 2 notas, R$ 40 de crédito, estoque 6 e quantidade local 2.':'No cenário padrão, com receptores idempotentes e reenvio habilitado: 1 nota, R$ 20 de crédito, estoque 8 e quantidade local 2.';
+ $('configHelp').textContent=original?'Neste modo, cada tentativa começa novamente e não envia chave. Os controles de retomada da saga não são usados.':'No modo saga, desmarcar idempotência e permitir reenvio reproduz a duplicação no receptor. Reinicie os dados ao trocar de cenário.';
+ $('idempotency').disabled=original;$('retry').disabled=original;
+ $('operationTitle').textContent=original?'Tentativas do fluxo original (somente diagnóstico)':'Operações e etapas salvas';
+ $('armed').textContent=s.purchase.config.fault?'Falha armada: '+JSON.stringify(s.purchase.config.fault):'Nenhuma falha armada.';
+ $('reservation').textContent='Reserva do item: '+(s.purchase.reservation||'livre');
+ $('operations').replaceChildren();const ops=Object.values(s.purchase.operations);
+ if(!ops.length)$('operations').textContent='Nenhuma operação.';
+ for(const op of ops){const div=document.createElement('div');div.className='op';const title=document.createElement('strong');title.textContent=(op.traceOnly?'Tentativa sem retomada · ':'')+op.state+' · '+op.id;const steps=document.createElement('div');steps.className='steps';steps.textContent=Object.entries(op.steps).map(([n,v])=>n.padEnd(14)+' '+v.state).join('\n')+(op.error?'\nErro: '+op.error:'');div.append(title,steps);$('operations').append(div);}
+ $('receivers').replaceChildren();for(const name of ['invoice','people','stock']){const row=document.createElement('tr');for(const val of [name,s[name].effects.length,Object.keys(s[name].receipts).length]){const td=document.createElement('td');td.textContent=val;row.append(td);}$('receivers').append(row);}
+ $('addresses').textContent=Object.entries(s.urls).map(([n,url])=>n+': '+url).join(' | ');
+ $('events').textContent=Object.entries(s).filter(([,v])=>v&&Array.isArray(v.events)).flatMap(([name,v])=>v.events.map(e=>({...e,name}))).sort((a,b)=>a.seq-b.seq).map(e=>e.at.slice(11,23)+' '+e.name.padEnd(8)+' '+e.message).join('\n');
+ $('raw').textContent=JSON.stringify(s,null,2);
+}
+async function action(fn){try{$('notice').textContent='';await fn();}catch(e){$('notice').textContent=e.message;}finally{await refresh();}}
+async function send(){const body=JSON.parse($('request').value);const r=await fetch('/purchases/itens/return',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return{status:r.status,body:await r.json()};}
+$('send').onclick=()=>action(async()=>{$('response').textContent=JSON.stringify(await send(),null,2);});
+$('parallel').onclick=()=>action(async()=>{$('response').textContent=JSON.stringify(await Promise.all([send(),send()]),null,2);});
+$('arm').onclick=()=>action(()=>api('/lab/config',{fault:{target:$('target').value,when:$('when').value}}));
+$('clear').onclick=()=>action(()=>api('/lab/config',{fault:null}));
+for(const id of ['idempotency','retry'])$(id).onchange=()=>action(()=>api('/lab/config',{idempotency:$('idempotency').checked,retryUnknown:$('retry').checked}));
+$('changeStock').onclick=()=>action(()=>api('/lab/stock',{quantity:Number($('stock').value)}));
+$('reset').onclick=()=>action(async()=>{await api('/lab/reset',{});$('response').textContent='Laboratório reiniciado.';});
+for(const [id,mode]of [['originalScenario','original'],['sagaScenario','saga']])$(id).onclick=()=>action(async()=>{
+ await api('/lab/scenario',{mode});
+ $('request').value=JSON.stringify({purchaseId:123,itemId:1,quantity:2,amountReturned:0});
+ $('response').textContent='Cenário preparado. Envie o mesmo pedido duas vezes: o primeiro recebe timeout; o segundo mostra o resultado da repetição.';
+});
+refresh().catch(e=>$('notice').textContent=e.message);setInterval(()=>refresh().catch(()=>{}),700);
+</script></html>

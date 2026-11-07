@@ -1,0 +1,70 @@
+POC: timeouts e idempotência na devolução de compras
+
+Requisito: Node.js 20 ou superior. Sem npm install, Maven, H2 ou build.
+
+Na raiz do repositório, execute:
+  node server.js
+
+Abrir:
+  http://127.0.0.1:8780
+
+Quatro servidores HTTP no mesmo processo:
+  purchase: 8780; invoice: 8781; people: 8782; stock: 8783
+As chamadas entre os servidores passam por HTTP real em loopback.
+Para outra faixa de portas, no PowerShell:
+  $env:POC_BASE_PORT = '8880'
+  node server.js
+
+Executar as simulações automatizadas isoladas:
+  node --test simulation.test.js
+
+Exemplo principal:
+1. Reiniciar laboratório. Manter os dois controles de idempotência/reenvio marcados.
+2. Armar falha em Estoque: aplicar efeito e perder a resposta.
+3. Enviar. A purchase recebe timeout e fica UNKNOWN, mas o estoque cai de 10 para 8.
+4. Alterar o saldo do estoque para zero, simulando outro usuário.
+5. Enviar o mesmo pedido. O receptor devolve o recibo anterior; o saldo continua zero.
+6. A purchase confirma as 2 unidades devolvidas, sem outro crédito, nota ou movimento.
+
+Comparação guiada do fluxo original e da solução:
+1. Clicar em Preparar fluxo original. Isso limpa os dados e arma timeout após o estoque.
+2. Enviar uma vez: retorna timeout; nota, crédito e estoque já foram aplicados.
+   A quantidade devolvida na purchase continua zero, representando rollback local.
+3. Enviar novamente: toda a cadeia é chamada outra vez, sem Idempotency-Key.
+   Resultado: 2 notas, R$ 40 de crédito, saldo de estoque 6 e quantidade local 2.
+4. Clicar em Preparar solução atual. Os dados serão reiniciados com a mesma falha.
+5. Enviar duas vezes. Resultado: 1 nota, R$ 20 de crédito, estoque 8 e quantidade local 2.
+Os registros de tentativas no modo original são somente diagnóstico para a tela;
+não funcionam como saga, identidade durável ou checkpoint de recuperação.
+
+Comparação mantendo saga, mas sem idempotência no receptor:
+1. Reiniciar laboratório. Desmarcar Receptores idempotentes; manter reenvio permitido.
+2. Armar falha no Crédito: aplicar efeito e perder a resposta.
+3. Enviar duas vezes. O crédito passa de 20 para 40: a segunda chamada duplicou o efeito.
+
+Outros cenários:
+- Timeout antes do efeito, erro de negócio ou falha na confirmação local.
+- Duas chamadas concorrentes; pedido diferente disputando o mesmo item.
+- UNKNOWN bloqueado pela configuração.
+- Reiniciar o processo mantém o progresso e os recibos nos arquivos .data/.
+- A falha armada é aplicada uma única vez a uma execução nova no receptor.
+  Uma etapa já concluída ou com recibo não reaplica o efeito nem consome essa falha.
+  Para a confirmação local, qualquer modo selecionado simula uma falha antes do commit.
+
+Limites:
+- Esta é uma simulação comportamental. Não usa nem altera as APIs, bancos ou serviços reais.
+- Arquivos JSON por serviço simulam o commit conjunto do efeito e do recibo.
+  Não substitui a validação de concorrência, transação e rollback no PostgreSQL.
+- Simula apenas compra 123, item 1, total 10 unidades, fornecedor 7 e matriz 1.
+  A unidade custa 10; referências são sempre criadas para exercitar essa etapa.
+- Não simula compensação, outbox, retentativas em segundo plano, múltiplas compras
+  ou o fluxo de cancelamento e substituição de devoluções.
+- O processo único simplifica a posse da operação. O reinício libera o executor
+  interrompido; a implementação real usa owner_token e lease_until.
+- O modo original omite a chave; os receptores aceitam a chamada sem deduplicá-la.
+  O modo saga envia uma chave estável por efeito, assim como a solução proposta.
+- O cenário original representa a repetição completa da cadeia e o rollback local
+  após timeout. Não reproduz todas as validações, entidades e regras da versão Java antiga.
+- Todos os endpoints /lab/* são controles locais de teste; não são novos endpoints
+  propostos para o controller de produção.
+- Use apenas como laboratório local. Ctrl+C encerra os quatro servidores.
